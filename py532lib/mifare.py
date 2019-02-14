@@ -107,7 +107,7 @@ class Mifare(i2c.Pn532_i2c):
         if response[1] != 0x00:
             # Only the status byte was returned. There was an error.
             if response[1] == 0x14:
-                raise IOError("Mifare authentication failed")
+                raise MifareAuthException("Mifare authentication failed")
             else:
                 raise IOError("InDataExchange returned error status: {0:#x}".format(response[1]))
         return response[2:]
@@ -151,10 +151,10 @@ class Mifare(i2c.Pn532_i2c):
 
         The "key_a" parameter is a bytearray that contains key A.
         You may specify an address directly or use the mifare_address()
-        function to calculate it. Raises an IOError if authentication failed.
+        function to calculate it. Raises an MifareException if authentication failed.
         """
         if self._uid == False:
-            raise RuntimeError("No Mifare card currently activated.")
+            raise MifareException("No Mifare card currently activated.")
         if len(self._uid) == 4:
             uid = self._uid
         elif len(self._uid) == 7: # 10-byte UID cards don't exist yet.
@@ -166,10 +166,10 @@ class Mifare(i2c.Pn532_i2c):
 
         The "key_a" parameter is a bytearray that contains key B.
         You may specify an address directly or use the mifare_address()
-        function to calculate it. Raises an IOError if authentication failed.
+        function to calculate it. Raises an MifareException if authentication failed.
         """
         if self._uid == False:
-            raise RuntimeError("No Mifare card currently activated.")
+            raise MifareException("No Mifare card currently activated.")
         if len(self._uid) == 4:
             uid = self._uid
         elif len(self._uid) == 7: # 10-byte UID cards don't exist yet.
@@ -260,3 +260,10 @@ class Mifare(i2c.Pn532_i2c):
         data = self.mifare_read(trailer_address)
         data = key_a + data[6:10] + key_b
         self.mifare_write_standard(trailer_address,data)
+
+class MifareException(Exception):
+    pass
+
+class MifareAuthException(Exception):
+    pass
+
