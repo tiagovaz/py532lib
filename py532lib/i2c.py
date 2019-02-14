@@ -7,22 +7,31 @@ This module contains classes and functions related to I2C communication for the 
 
 """
 
-import os
-import sys
+import os, sys, signal
 lib_path = os.path.abspath('../')
 sys.path.append(lib_path)
 
 from time import sleep
 import logging
-from quick2wire.i2c import I2CMaster, reading, writing
+if sys.version_info > (3, 0):
+	from quick2wire.i2c import I2CMaster, reading, writing
+else:
+	import smbus
 from py532lib.i2c import *
 from py532lib.frame import *
 from py532lib.constants import *
 
 
-LOGGING_ENABLED = False
+LOGGING_ENABLED = True
 LOG_LEVEL = logging.DEBUG
 DEFAULT_DELAY = 0.005
+
+
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException()
 
 
 class Pn532_i2c:
@@ -53,9 +62,12 @@ class Pn532_i2c:
 
         self.address = address
         self.i2c_channel = i2c_channel
-        self.PN532 = I2CMaster(self.i2c_channel)
+        if sys.version_info > (3, 0):
+            self.PN532 = I2CMaster(self.i2c_channel)
+        else:
+            self.PN532 = smbus.SMBus(self.i2c_channel)
 
-    def send_command_check_ack(self, frame):
+    def send_command_check_ack(self, frame, timeout = 3600):
         """Sends a command frame, and waits for an ACK frame.
 
         Arguments:
@@ -63,44 +75,60 @@ class Pn532_i2c:
 
         """
         self.send_command(frame)
-        if self.read_ack():
+        if self.read_ack(timeout):
             return True
         else:
             return False
 
-    def read_response(self):
+    def read_response(self, timeout = 3600):
         """Wait, then read for a response from the PN532."""
         logging.debug("readResponse...")
         response = [b'\x00\x00\x00\x00\x00\x00\x00']
 
-        while True:
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
 
-            try:
-                logging.debug("readResponse..............Reading.")
+        try:	
+            while True:
 
-                sleep(DEFAULT_DELAY)
-                response = self.PN532.transaction(
-                    reading(self.address, 255))
-                logging.debug(response)
-                logging.debug("readResponse..............Read.")
-            except Exception:
-                pass
-            else:
                 try:
-                    frame = Pn532Frame.from_response(response)
-
-                    # Acknowledge Data frames coming from the PN532
-                    if frame.get_frame_type() == PN532_FRAME_TYPE_DATA:
-                        self.send_command(Pn532Frame(
-                            frame_type=PN532_FRAME_TYPE_ACK))
-
-                except Exception as ex:
-                    logging.debug(ex)
-                    logging.debug(ex.args)
+                    logging.debug("readResponse..............Reading.")
+    
+                    sleep(DEFAULT_DELAY)
+                    if sys.version_info > (3, 0):
+                        response = self.PN532.transaction(
+                            reading(self.address, 255))
+                    else:
+                        response = self.PN532.read_i2c_block_data(self.address, 255)
+                    logging.debug(response)
+                    logging.debug("readResponse..............Read.")
+                except TimeoutException:
+                    return 'no nfc tag in range'
+                except Exception:
                     pass
                 else:
-                    return frame
+                    try:
+                        frame = Pn532Frame.from_response(response)
 
+                        # Acknowledge Data frames coming from the PN532
+                        if frame.get_frame_type() == PN532_FRAME_TYPE_DATA:
+                            self.send_command(Pn532Frame(
+                                frame_type=PN532_FRAME_TYPE_ACK))
+
+                    except TimeoutException:
+                        return 'no nfc tag in range'
+                    except Exception as ex:
+                        logging.debug(ex)
+                        logging.debug(ex.args)
+                        pass
+                    else:
+                        signal.alarm(0)
+                        return frame
+        except TimeoutException:
+            return 'no nfc tag in range'
+        finally:
+            signal.signal(signal.SIGALRM, old_handler)
+        
     def send_command(self, frame):
         """Sends a command frame to the PN532.
 
@@ -115,10 +143,20 @@ class Pn532_i2c:
                 logging.debug("send_command...........Sending.")
 
                 sleep(DEFAULT_DELAY)
-                self.PN532.transaction(
-                    writing(self.address, frame.to_tuple()))
+                data = frame.to_tuple()
+                logging.debug(data)
 
-                logging.debug(frame.to_tuple())
+                if sys.version_info > (3, 0):
+                    self.PN532.transaction(
+                        writing(self.address, data))
+                else:
+                    cmd = data[0]
+                    data[0] = len(data) - 1
+                    ldata = []
+                    for byte in data:
+                        ldata.append(int(byte))
+                    logging.debug(len(ldata[1:]))
+                    self.PN532.write_i2c_block_data(self.address, data[0], ldata[1:])
 
                 logging.debug("send_command...........Sent.")
             except Exception as ex:
@@ -129,33 +167,49 @@ class Pn532_i2c:
             else:
                 return True
 
-    def read_ack(self):
+    def read_ack(self, timeout):
         """Wait for a valid ACK frame to be returned."""
         logging.debug("read_ack...")
 
-        while True:
-            sleep(DEFAULT_DELAY)
-            response_frame = self.read_response()
+        def timeout_handler(signum, frame):
+            raise TimeoutException()
 
-            if response_frame.get_frame_type() == PN532_FRAME_TYPE_ACK:
-                return True
-            else:
-                pass
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
 
-    def read_mifare(self):
+        try:
+            while True:
+                sleep(DEFAULT_DELAY)
+                response_frame = self.read_response()
+
+                if response_frame.get_frame_type() == PN532_FRAME_TYPE_ACK:
+                    signal.alarm(0)
+                    return True
+                else:
+                    pass
+        except TimeoutException:
+         	return 'no nfc tag in range'
+        finally:
+        	signal.signal(signal.SIGALRM, old_handler)
+
+    def read_mifare(self, timeout = 3600):
         """Wait for a MiFARE card to be in the PN532's field, and read it's UID."""
         frame = Pn532Frame(frame_type=PN532_FRAME_TYPE_DATA, data=bytearray([PN532_COMMAND_INLISTPASSIVETARGET, 0x01, 0x00]))
-        self.send_command_check_ack(frame)
+        self.send_command_check_ack(frame, timeout)
 
-        return self.read_response()
+        return self.read_response(timeout)
 
     def reset_i2c(self):
         """Reset the I2C communication connection."""
         logging.debug("I2C Reset...")
 
-        self.PN532.close()
-        del self.PN532
-        self.PN532 = I2CMaster(self.i2c_channel)
+        if sys.version_info > (3, 0):
+            self.PN532.close()
+            del self.PN532
+            self.PN532 = I2CMaster(self.i2c_channel)
+        else:
+            del self.PN532
+            self.PN532 = smbus.SMBus(self.i2c_channel)
 
         logging.debug("I2C Reset............Created.")
 
@@ -178,5 +232,6 @@ class Pn532_i2c:
 
     def __exit__(self, type, value, traceback):
         """Make sure the I2C communication channel is closed."""
-        self.PN532.close()
+        if sys.version_info > (3, 0):
+            self.PN532.close()
         del self.PN532
